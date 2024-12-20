@@ -30,18 +30,18 @@ type Field struct {
 }
 
 type ParsedQuery struct {
-	AND     []interface{} `json:"AND,omitempty"`
-	OR      []interface{} `json:"OR,omitempty"`
-	AND_NOT []interface{} `json:"AND_NOT,omitempty"`
+	AND     []ParsedQuery `json:"AND,omitempty"`
+	OR      []ParsedQuery `json:"OR,omitempty"`
+	AND_NOT []ParsedQuery `json:"AND_NOT,omitempty"`
 	Field   *Field        `json:"field,omitempty"`
 }
 
 func isEmptyQuery(query *ParsedQuery) bool {
 	return query == nil ||
 		(query.Field == nil &&
-			(query.AND == nil || len(query.AND) == 0) &&
-			(query.OR == nil || len(query.OR) == 0) &&
-			(query.AND_NOT == nil || len(query.AND_NOT) == 0))
+			len(query.AND) == 0 &&
+			len(query.OR) == 0 &&
+			len(query.AND_NOT) == 0)
 }
 
 func cleanupQuery(query *ParsedQuery) *ParsedQuery {
@@ -49,79 +49,58 @@ func cleanupQuery(query *ParsedQuery) *ParsedQuery {
 		return nil
 	}
 
-	if query.AND != nil {
-		var cleanAND []interface{}
-		for _, item := range query.AND {
-			if subQuery, ok := item.(ParsedQuery); ok {
-				cleaned := cleanupQuery(&subQuery)
-				if !isEmptyQuery(cleaned) {
-					cleanAND = append(cleanAND, *cleaned)
-				}
-			} else if subQuery, ok := item.(*ParsedQuery); ok {
-				cleaned := cleanupQuery(subQuery)
-				if !isEmptyQuery(cleaned) {
-					cleanAND = append(cleanAND, *cleaned)
-				}
-			} else if field, ok := item.(Field); ok {
-				cleanAND = append(cleanAND, ParsedQuery{Field: &field})
+	// Create a new query to hold cleaned data
+	cleaned := &ParsedQuery{}
+
+	// Clean AND queries
+	if len(query.AND) > 0 {
+		for _, subQuery := range query.AND {
+			if cleanedSub := cleanupQuery(&subQuery); !isEmptyQuery(cleanedSub) {
+				cleaned.AND = append(cleaned.AND, *cleanedSub)
 			}
-		}
-		if len(cleanAND) > 0 {
-			query.AND = cleanAND
-		} else {
-			query.AND = nil
 		}
 	}
 
-	if query.OR != nil {
-		var cleanOR []interface{}
-		for _, item := range query.OR {
-			if subQuery, ok := item.(ParsedQuery); ok {
-				cleaned := cleanupQuery(&subQuery)
-				if !isEmptyQuery(cleaned) {
-					cleanOR = append(cleanOR, *cleaned)
-				}
-			} else if subQuery, ok := item.(*ParsedQuery); ok {
-				cleaned := cleanupQuery(subQuery)
-				if !isEmptyQuery(cleaned) {
-					cleanOR = append(cleanOR, *cleaned)
-				}
-			} else if field, ok := item.(Field); ok {
-				cleanOR = append(cleanOR, ParsedQuery{Field: &field})
+	// Clean OR queries
+	if len(query.OR) > 0 {
+		for _, subQuery := range query.OR {
+			if cleanedSub := cleanupQuery(&subQuery); !isEmptyQuery(cleanedSub) {
+				cleaned.OR = append(cleaned.OR, *cleanedSub)
 			}
-		}
-		if len(cleanOR) > 0 {
-			query.OR = cleanOR
-		} else {
-			query.OR = nil
 		}
 	}
 
-	if query.AND_NOT != nil {
-		var cleanANDNOT []interface{}
-		for _, item := range query.AND_NOT {
-			if subQuery, ok := item.(ParsedQuery); ok {
-				cleaned := cleanupQuery(&subQuery)
-				if !isEmptyQuery(cleaned) {
-					cleanANDNOT = append(cleanANDNOT, *cleaned)
-				}
-			} else if subQuery, ok := item.(*ParsedQuery); ok {
-				cleaned := cleanupQuery(subQuery)
-				if !isEmptyQuery(cleaned) {
-					cleanANDNOT = append(cleanANDNOT, *cleaned)
-				}
-			} else if field, ok := item.(Field); ok {
-				cleanANDNOT = append(cleanANDNOT, ParsedQuery{Field: &field})
+	// Clean AND_NOT queries
+	if len(query.AND_NOT) > 0 {
+		for _, subQuery := range query.AND_NOT {
+			if cleanedSub := cleanupQuery(&subQuery); !isEmptyQuery(cleanedSub) {
+				cleaned.AND_NOT = append(cleaned.AND_NOT, *cleanedSub)
 			}
-		}
-		if len(cleanANDNOT) > 0 {
-			query.AND_NOT = cleanANDNOT
-		} else {
-			query.AND_NOT = nil
 		}
 	}
 
-	return query
+	// Copy field if it exists
+	if query.Field != nil {
+		cleaned.Field = query.Field
+	}
+
+	// If the cleaned query is empty, return nil
+	if isEmptyQuery(cleaned) {
+		return nil
+	}
+
+	// Simplify single-item arrays
+	if len(cleaned.AND) == 1 && len(cleaned.OR) == 0 && len(cleaned.AND_NOT) == 0 && cleaned.Field == nil {
+		return cleanupQuery(&cleaned.AND[0])
+	}
+	if len(cleaned.OR) == 1 && len(cleaned.AND) == 0 && len(cleaned.AND_NOT) == 0 && cleaned.Field == nil {
+		return cleanupQuery(&cleaned.OR[0])
+	}
+	if len(cleaned.AND_NOT) == 1 && len(cleaned.AND) == 0 && len(cleaned.OR) == 0 && cleaned.Field == nil {
+		return cleanupQuery(&cleaned.AND_NOT[0])
+	}
+
+	return cleaned
 }
 
 func tokenize(query string) []Token {
@@ -140,52 +119,46 @@ func tokenize(query string) []Token {
 	query = strings.ReplaceAll(query, " AND ", " AND ")
 	query = strings.ReplaceAll(query, " OR ", " OR ")
 
-	re := regexp.MustCompile(`(TITLE-ABS-KEY|TITLE-ABS|TITLE|AUTHKEY)\s*\("([^"]+)"\)|OR|AND_NOT|AND|\(|\)|"([^"]+)"`)
-
+	re := regexp.MustCompile(`(TITLE-ABS-KEY|TITLE-ABS|TITLE|AUTHKEY)\s*\("([^"]+?)"\)|OR|AND_NOT|AND|\(|\)|"([^"]+?)"`)
 	matches := re.FindAllStringSubmatchIndex(query, -1)
 
 	for matchIndex, match := range matches {
-		fullMatch := query[match[0]:match[1]]
-		fullMatch = strings.TrimSpace(fullMatch)
-
-		var currentToken Token
+		fullMatch := strings.TrimSpace(query[match[0]:match[1]])
+		var token Token
 
 		switch {
 		case fullMatch == "OR":
-			currentToken = Token{Type: TokenOR, Value: fullMatch}
+			token = Token{Type: TokenOR, Value: fullMatch}
 		case fullMatch == "AND":
-			currentToken = Token{Type: TokenAND, Value: fullMatch}
+			token = Token{Type: TokenAND, Value: fullMatch}
 		case fullMatch == "AND_NOT":
-			currentToken = Token{Type: TokenANDNOT, Value: fullMatch}
+			token = Token{Type: TokenANDNOT, Value: fullMatch}
 		case fullMatch == "(":
-			currentToken = Token{Type: TokenOpenParen, Value: fullMatch}
+			token = Token{Type: TokenOpenParen, Value: fullMatch}
 		case fullMatch == ")":
-			currentToken = Token{Type: TokenCloseParen, Value: fullMatch}
+			token = Token{Type: TokenCloseParen, Value: fullMatch}
 		default:
 			if strings.Contains(fullMatch, "(") {
-				re := regexp.MustCompile(`(TITLE-ABS-KEY|TITLE-ABS|TITLE|AUTHKEY)\s*\("([^"]+)"\)`)
-				subMatches := re.FindStringSubmatch(fullMatch)
-				if len(subMatches) == 3 {
-					fieldType := subMatches[1]
-					value := subMatches[2]
-					currentToken = Token{
+				re := regexp.MustCompile(`(TITLE-ABS-KEY|TITLE-ABS|TITLE|AUTHKEY)\s*\("((?:[^"\\]|\\.)+)"\)`)
+				if subMatches := re.FindStringSubmatch(fullMatch); len(subMatches) == 3 {
+					token = Token{
 						Type:  TokenField,
-						Value: fmt.Sprintf("%s:%s", fieldType, value),
+						Value: fmt.Sprintf("%s:%s", subMatches[1], subMatches[2]),
 					}
 				}
 			} else if strings.HasPrefix(fullMatch, `"`) && strings.HasSuffix(fullMatch, `"`) {
-				value := strings.Trim(fullMatch, `"`)
-				currentToken = Token{
+				token = Token{
 					Type:  TokenField,
-					Value: fmt.Sprintf("ANY:%s", value),
+					Value: fmt.Sprintf("ANY:%s", strings.Trim(fullMatch, `"`)),
 				}
 			}
 		}
 
-		if currentToken.Type != 0 || currentToken.Value != "" {
-			tokens = append(tokens, currentToken)
+		if token.Type != 0 || token.Value != "" {
+			tokens = append(tokens, token)
 
-			if matchIndex < len(matches)-1 && currentToken.Type == TokenField {
+			// Add implicit AND operators
+			if matchIndex < len(matches)-1 && token.Type == TokenField {
 				nextStart := matches[matchIndex+1][0]
 				between := strings.TrimSpace(query[match[1]:nextStart])
 				if between == "" && len(tokens) > 1 &&
@@ -201,9 +174,13 @@ func tokenize(query string) []Token {
 }
 
 func parseTokens(tokens []Token) *ParsedQuery {
-	var stack []*ParsedQuery
-	var currentGroup *ParsedQuery
-	currentOperator := TokenAND
+	type StackItem struct {
+		query    *ParsedQuery
+		operator int
+	}
+
+	var stack []StackItem
+	current := StackItem{query: &ParsedQuery{}, operator: TokenAND}
 
 	for _, token := range tokens {
 		switch token.Type {
@@ -213,77 +190,52 @@ func parseTokens(tokens []Token) *ParsedQuery {
 				continue
 			}
 
-			field := &Field{
-				Field: parts[0],
-				Value: parts[1],
+			fieldQuery := ParsedQuery{
+				Field: &Field{
+					Field: parts[0],
+					Value: parts[1],
+				},
 			}
 
-			if currentGroup == nil {
-				currentGroup = &ParsedQuery{}
-			}
-
-			newQuery := ParsedQuery{Field: field}
-
-			switch currentOperator {
+			switch current.operator {
+			case TokenAND:
+				current.query.AND = append(current.query.AND, fieldQuery)
 			case TokenOR:
-				if currentGroup.OR == nil {
-					currentGroup.OR = []interface{}{}
-				}
-				currentGroup.OR = append(currentGroup.OR, newQuery)
+				current.query.OR = append(current.query.OR, fieldQuery)
 			case TokenANDNOT:
-				if currentGroup.AND_NOT == nil {
-					currentGroup.AND_NOT = []interface{}{}
-				}
-				currentGroup.AND_NOT = append(currentGroup.AND_NOT, newQuery)
-			default:
-				if currentGroup.AND == nil {
-					currentGroup.AND = []interface{}{}
-				}
-				currentGroup.AND = append(currentGroup.AND, newQuery)
+				current.query.AND_NOT = append(current.query.AND_NOT, fieldQuery)
 			}
 
 		case TokenOR, TokenAND, TokenANDNOT:
-			currentOperator = token.Type
+			current.operator = token.Type
 
 		case TokenOpenParen:
-			newGroup := &ParsedQuery{}
-			if currentGroup != nil {
-				stack = append(stack, currentGroup)
-			}
-			currentGroup = newGroup
+			stack = append(stack, current)
+			current = StackItem{query: &ParsedQuery{}, operator: TokenAND}
 
 		case TokenCloseParen:
-			if len(stack) > 0 && currentGroup != nil {
-				lastIndex := len(stack) - 1
-				parent := stack[lastIndex]
-				stack = stack[:lastIndex]
-
-				cleaned := cleanupQuery(currentGroup)
-				if !isEmptyQuery(cleaned) {
-					switch currentOperator {
-					case TokenOR:
-						if parent.OR == nil {
-							parent.OR = []interface{}{}
-						}
-						parent.OR = append(parent.OR, *cleaned)
-					case TokenANDNOT:
-						if parent.AND_NOT == nil {
-							parent.AND_NOT = []interface{}{}
-						}
-						parent.AND_NOT = append(parent.AND_NOT, *cleaned)
-					default:
-						if parent.AND == nil {
-							parent.AND = []interface{}{}
-						}
-						parent.AND = append(parent.AND, *cleaned)
-					}
-				}
-				currentGroup = parent
+			if len(stack) == 0 {
+				continue
 			}
+
+			if cleaned := cleanupQuery(current.query); !isEmptyQuery(cleaned) {
+				parent := stack[len(stack)-1]
+				switch parent.operator {
+				case TokenAND:
+					parent.query.AND = append(parent.query.AND, *cleaned)
+				case TokenOR:
+					parent.query.OR = append(parent.query.OR, *cleaned)
+				case TokenANDNOT:
+					parent.query.AND_NOT = append(parent.query.AND_NOT, *cleaned)
+				}
+			}
+
+			current = stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
 		}
 	}
 
-	return cleanupQuery(currentGroup)
+	return cleanupQuery(current.query)
 }
 
 func processQuery(query string) (*ParsedQuery, error) {
@@ -309,7 +261,7 @@ func processFile(inputPath string) error {
 	}
 	defer outputFile.Close()
 
-	var allQueries []interface{}
+	var allQueries []ParsedQuery
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
@@ -328,7 +280,7 @@ func processFile(inputPath string) error {
 		}
 
 		if !isEmptyQuery(parsedQuery) {
-			allQueries = append(allQueries, parsedQuery)
+			allQueries = append(allQueries, *parsedQuery)
 		}
 	}
 
@@ -354,7 +306,6 @@ func main() {
 	}
 
 	inputFile := os.Args[1]
-
 	if err := processFile(inputFile); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
